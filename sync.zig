@@ -47,11 +47,11 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     // bufs are filled in
     const res = try std.os.readv(fd, iovecs);
     std.debug.print("BYTES READ: {any}\n", .{res});
+
+    // finally, we can now print all the bufs to stdout
     for (iovecs) |iovec| {
         std.debug.print("{s}\n", .{iovec.iov_base[0..iovec.iov_len]});
     }
-
-    // finally, we can now print all the bufs to stdout
 }
 
 pub fn main() !void {
