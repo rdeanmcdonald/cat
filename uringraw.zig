@@ -8,6 +8,36 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const QUEUE_DEPTH = 1;
 
+const Sring = struct {
+    // ptr to the array of indices
+    array: [*]u32,
+    // ptr to the head index
+    head: *u32,
+    // ptr to the tail index
+    tail: *u32,
+    // the actual ring mask
+    mask: u32,
+    // ring_entries count
+    entries: u32,
+    // ptr to the flags
+    flags: *u32,
+    // sqes
+    sqes: [*]linux.io_uring_sqe,
+};
+
+const Cring = struct {
+    // ptr to the array of cqes
+    cqes: [*]u32,
+    // ptr to the head index
+    head: *u32,
+    // ptr to the tail index
+    tail: *u32,
+    // the actual ring mask
+    mask: u32,
+    // the ring_entries count
+    entries: u32,
+};
+
 fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     _ = allocator;
     _ = file_path;
@@ -91,6 +121,46 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     const sqes_size = params.sq_entries * @sizeOf(linux.io_uring_sqe);
     const mmap_sqes = try os.mmap(null, sqes_size, os.PROT.READ | os.PROT.WRITE, os.MAP.SHARED | os.MAP.POPULATE, fd, linux.IORING_OFF_SQES);
     std.debug.print("mmap_sqes len: {any}\n", .{mmap_sqes.len});
+
+    // Now, we actually want pointers back for all the stuff. The mmap is a
+    // slice of u8's, so we index into it by byte. We must cast from u8 into
+    // the proper types. Just getting the u8 ptrs separately to make it clearer
+    // for myself how getting the correct ptr type.
+    const sq_ring_ptr_u8 = &mmap_rings[params.sq_off.array];
+    const sq_head_ptr_u8 = &mmap_rings[params.sq_off.head];
+    const sq_tail_ptr_u8 = &mmap_rings[params.sq_off.tail];
+    const sq_mask_ptr_u8 = &mmap_rings[params.sq_off.ring_mask];
+    const sq_entries_ptr_u8 = &mmap_rings[params.sq_off.ring_entries];
+    const sq_flags_ptr_u8 = &mmap_rings[params.sq_off.flags];
+    // the sqes were mmaped by themselves, from IORING_OFF_SQES to sqes_size,
+    // so just get an array ptr to the beginning of the mmap slize. (note, zig
+    // io_uring impl does thing a little more nicely, i.e. not passing around
+    // pointers, and just using slices, but I'm following the C example.
+    const sqes_ptr_u8 = &mmap_sqes[0];
+
+    // We can't turn a *u8 into anything higher (u32), because the compiler
+    // throws an error: "cast increases pointer alignment". So we need to do an
+    // alignCast before the ptrCast I guess (following what zig io_uring does)
+    const sring = Sring{
+        .array = @ptrCast(@alignCast(sq_ring_ptr_u8)),
+        .head = @ptrCast(@alignCast(sq_head_ptr_u8)),
+        .tail = @ptrCast(@alignCast(sq_tail_ptr_u8)),
+        .mask = @as(*u32, @ptrCast(@alignCast(sq_mask_ptr_u8))).*, // should be entries - 1
+        .entries = @as(*u32, @ptrCast(@alignCast(sq_entries_ptr_u8))).*,
+        .flags = @ptrCast(@alignCast(sq_flags_ptr_u8)),
+        .sqes = @ptrCast(@alignCast(sqes_ptr_u8)),
+    };
+    std.debug.print("sring: {any}\n", .{sring});
+
+    // Not breaking things apart for the cqes
+    const cring = Cring{
+        .cqes = @ptrCast(@alignCast(&mmap_rings[params.cq_off.cqes])),
+        .head = @ptrCast(@alignCast(&mmap_rings[params.cq_off.head])),
+        .tail = @ptrCast(@alignCast(&mmap_rings[params.cq_off.tail])),
+        .entries = @as(*u32, @ptrCast(@alignCast(&mmap_rings[params.cq_off.ring_entries]))).*,
+        .mask = @as(*u32, @ptrCast(@alignCast(&mmap_rings[params.cq_off.ring_mask]))).*, // entries - 1
+    };
+    std.debug.print("cring: {any}\n", .{cring});
 }
 
 pub fn main() !void {
