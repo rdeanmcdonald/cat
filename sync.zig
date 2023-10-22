@@ -10,7 +10,7 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     const fd: std.os.fd_t = try std.os.open(file_path, std.os.O.RDONLY, mode);
     const fstat: std.os.Stat = try std.os.fstat(fd);
     const size: std.os.off_t = fstat.size;
-    var blocks: usize = @divFloor(std.math.absCast(size), @as(usize, BLOCK_SIZE));
+    var blocks: usize = @divFloor(@as(usize, @intCast(size)), @as(usize, BLOCK_SIZE));
     // make sure we have enough blocks since we round down above
     if (@mod(size, BLOCK_SIZE) != 0) {
         blocks += 1;
@@ -34,10 +34,10 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
             bytes_to_read = BLOCK_SIZE;
         }
 
-        var buff: []u8 = try allocator.alloc(u8, std.math.absCast(bytes_to_read));
+        var buff: []u8 = try allocator.alloc(u8, @intCast(bytes_to_read));
 
         iovecs[current_block].iov_base = buff.ptr;
-        iovecs[current_block].iov_len = std.math.absCast(bytes_to_read);
+        iovecs[current_block].iov_len = @intCast(bytes_to_read);
 
         bytes_remaining -= bytes_to_read;
         current_block += 1;

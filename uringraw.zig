@@ -1,27 +1,42 @@
-// const x86_64_bits = @import("linux/x86_64.zig");
+/// This is the cat program using io_uring to perform the read syscall. It's
+/// not using any lib support, so all the io_uring stuff is as raw as it gets!
+/// Which means it is quite cumbersome, but just awesome to see it all laid out
+/// In uringlib.zig we use zig's implementation of liburing, which makes things
+/// way nicer (but hides a lot of what is going on with io_uring interface). 
+///
+/// This is just for my personal education about zig and io_uring, so it's
+/// mostly laid out in very careless/excessive ways so I can come back to it
+/// and understand what I was thinking.
+
 const std = @import("std");
 const os = std.os;
 const linux = os.linux;
 const SYS = linux.SYS;
 const syscall2 = linux.syscall2;
+const syscall6 = linux.syscall6;
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const QUEUE_DEPTH = 1;
 
+const ReadVUserData = struct {
+    /// ptr to array of iovec
+    iovecs: []os.iovec,
+};
+
 const Sring = struct {
-    // ptr to the array of indices
+    /// ptr to the array of indices
     array: [*]u32,
-    // ptr to the head index
+    /// ptr to the head index
     head: *u32,
-    // ptr to the tail index
+    /// ptr to the tail index
     tail: *u32,
-    // the actual ring mask
+    /// the actual ring mask
     mask: u32,
-    // ring_entries count
+    /// ring_entries count
     entries: u32,
-    // ptr to the flags
-    flags: *u32,
-    // sqes
+    /// flags
+    flags: u32,
+    /// array of sqes
     sqes: [*]linux.io_uring_sqe,
 };
 
@@ -38,11 +53,15 @@ const Cring = struct {
     entries: u32,
 };
 
-fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
-    _ = allocator;
-    _ = file_path;
+const IoUring = struct {
+    sring: Sring,
+    cring: Cring,
+    fd: os.fd_t,
+};
 
-    // setup iouring
+// Not worrying about cleaning up memory, since the program exits after reading
+// and printing
+fn io_uring_setup() !IoUring {
     // set io uring params fields to 0. since linux.io_uring_params struct
     // provides no defaults, the fields all default to 0. to override a specific
     // field in the struct to non-zero, just add it to the .{} arg the value you
@@ -53,8 +72,8 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     // });
     var params = mem.zeroInit(linux.io_uring_params, .{});
 
-    // Setup will create arrs for at least QUEUE_DEPTH number of elements (I
-    // think it must round up to nearest power of 2 for the masking stuff)
+    // Setup will create arrs for at least QUEUE_DEPTH number of elements (must
+    // round the sq/cq size up to nearest power of 2 for the masking stuff)
     var fd: os.fd_t = @intCast(syscall2(SYS.io_uring_setup, QUEUE_DEPTH, @intFromPtr(&params)));
 
     // that was easy! not worrying about errors
@@ -70,13 +89,13 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     // the cqe.head, mask that val, and that's your idx! Know that the arrs are
     // a power of 2 in size to allow for this.
     //
-    // there's 1 file which holds allll the data. There's 3 important areas in
+    // There's 1 file which holds allll the data. There's 3 important areas in
     // that file that need to be mmaped (shared between kernel and user space):
     //      1. sq ring - contains head/tail/etc... and importantly conatins an
     //      array pointed to by sq_off.array, which is an array of indexes into
     //      another array, the sqe array
-    //      2. cq ring - pointed to by cq_off.cqes, which is an array of cqe
-    //      structs
+    //      2. cq ring - again contains head/tail/etc... and an array pointed
+    //      to by cq_off.cqes, which is an array of cqe structs
     //      3. sqes - the actual sqes array, which is not pointed to by anything
     //      returned by setup, but implicitly starts at the IORING_OFF_SQES in
     //      the file (which starts at 0x10000000 in hex or about 268 MB - 2^28 -
@@ -85,7 +104,7 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     //      page size returned by sysconf(_SC_PAGE_SIZE)
     //
     // we only need 2 mmap calls for these 3 important areas
-    //      1. mmap the sq/cq rings - I guess sq/cq rings are organized by
+    //      1. mmap the sq/cq rings - I guess sq/cq rings are organized by the
     //      kernal in such a way that we can just do 1 mmap call for both of
     //      these.
     //
@@ -98,8 +117,8 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     // For the first mmap, the logic goes like this, sq ring starts at
     // sq_off.array bytes, and extends p.sq_entries*sizeof(u32). cq ring
     // starts at cq_off.cqes and extends p.cq_entries*sizeof(cqe). These two
-    // arrays live in the same memory space. Either of the arrays can come
-    // before the other in the memory space, so we are required to map the
+    // arrays live in the same mapped memory space. Either of the arrays can
+    // come before the other in the memory space, so we are required to map the
     // memory starting at IORING_OFF_SQ_RING (0), out to the last byte of
     // either the sq or cq rings array (which ever order the os sets them up
     // in). I guess the kernal ensures one of them is the last piece of data
@@ -134,7 +153,7 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
     const sq_flags_ptr_u8 = &mmap_rings[params.sq_off.flags];
     // the sqes were mmaped by themselves, from IORING_OFF_SQES to sqes_size,
     // so just get an array ptr to the beginning of the mmap slize. (note, zig
-    // io_uring impl does thing a little more nicely, i.e. not passing around
+    // io_uring impl does things a little more nicely, i.e. not passing around
     // pointers, and just using slices, but I'm following the C example.
     const sqes_ptr_u8 = &mmap_sqes[0];
 
@@ -147,7 +166,7 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
         .tail = @ptrCast(@alignCast(sq_tail_ptr_u8)),
         .mask = @as(*u32, @ptrCast(@alignCast(sq_mask_ptr_u8))).*, // should be entries - 1
         .entries = @as(*u32, @ptrCast(@alignCast(sq_entries_ptr_u8))).*,
-        .flags = @ptrCast(@alignCast(sq_flags_ptr_u8)),
+        .flags = @as(*u32, @ptrCast(@alignCast(sq_flags_ptr_u8))).*,
         .sqes = @ptrCast(@alignCast(sqes_ptr_u8)),
     };
     std.debug.print("sring: {any}\n", .{sring});
@@ -161,9 +180,127 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
         .mask = @as(*u32, @ptrCast(@alignCast(&mmap_rings[params.cq_off.ring_mask]))).*, // entries - 1
     };
     std.debug.print("cring: {any}\n", .{cring});
+
+    return .{ .sring = sring, .cring = cring, .fd = fd };
+}
+
+fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring) !void {
+    // Here we perform our "read" using io_uring. The read will work much the
+    // same as it did in the sync.zig example, we'll perpare the iovec
+    // structures and underlying buffers, then rather than performing our readv
+    // syscall, we fill in an sqe for the io_uring IORING_OP_READV operation.
+    // First, like in sync, create a file description entry
+    const fd = try os.open(file_path, os.O.RDONLY, 0o666);
+    const fstat: os.Stat = try os.fstat(fd);
+
+    // Now, produce an array of iovecs, each containing a buf of BUFF_SIZE.
+    // Given the file size, how many buffers do we need?
+    const BUFF_SIZE: usize = 4096;
+    var buffCount = @divFloor(fstat.size, BUFF_SIZE);
+    // If not evenly divisible into buff_size, need to add one
+    if (@mod(fstat.size, BUFF_SIZE) != 0) {
+        buffCount += 1;
+    }
+    std.debug.print("buffCount: {any}\n", .{buffCount});
+
+    // Now alloc all the iovecs
+    var iovecs: []os.iovec = try allocator.*.alloc(os.iovec, @intCast(buffCount));
+
+    // Now alloc all the buffs and put them in the iovec. Again, being lazy
+    // about deallocating, since this cat program will just exit when done
+    // anyways.
+    for (iovecs) |*iovec| {
+        var buff = try allocator.*.alloc(u8, BUFF_SIZE);
+
+        iovec.*.iov_len = buff.len;
+        iovec.*.iov_base = buff.ptr;
+    }
+
+    std.debug.print("iovecs: {any}\n", .{iovecs});
+
+    // Ok! Now we have all we need to fill in an SQE, then submit that to the
+    // io_uring. First "get" a vacant sqe from io_uring, fill it in, then
+    // "enter" it into io_uring. By vacant I just mean the next sqe in the
+    // array that hasn't been submitted yet, aka the sqe pointed at by the tail
+    // index of the sqes is the one we need to get a hold of. Userspace is the
+    // only "writer" to the tail index. So reading the tail requires nothing
+    // special.
+    // - Technically, you'd want to see if the queue is full, but this is just
+    // a one and done use of the ring, and we control the QUEUE_DEPTH (i.e
+    // won't write to a full queue, in other words, we have 1 readv call to
+    // make, and a QUEUE_DEPTH of 1), so not worrying about it right now. Also
+    // reading the head requires atomicLoad, since it's written to by the
+    // kernal thread, so we'd need the latest update to the head. And just for
+    // my own recollection, there is nothing to guarantee that after we load
+    // the head that it's not updated by the kernal, however, having a slightly
+    // stale head value would only cause our thead to think the queue is full
+    // when it technically isn't, so it's not detrimental, "conservative",
+    // better than using a lock to ensure a totally correct value for the head)
+    const tail = io_uring.sring.tail.*;
+    const next_tail = tail + 1;
+    const sqe_idx = tail & io_uring.sring.mask;
+    var sqe = io_uring.sring.sqes[sqe_idx];
+    sqe.fd = fd;
+    sqe.flags = 0;
+    // this is what makes io_uring do the equivelant of the readv syscall
+    sqe.opcode = linux.IORING_OP.READV;
+    // because we're doing a readv, we need the iovecs ptr here
+    sqe.addr = @intFromPtr(iovecs.ptr);
+    sqe.len = @as(u32, @intCast(buffCount));
+    sqe.off = 0;
+
+    // now to fill the "user_data". Technically, here we're only making one
+    // io_uring submission, so we know what we're getting out on the cq side,
+    // but might as well set the following up since it's so easy. On the cqe
+    // size, how do we know the number of iovecs submitted with the readv? We
+    // need to setup a structure which holds some relevant info, so on the cq
+    // side we can do what we need with the filled in iovec buffs, namely print
+    // the buffs to stdout.
+    const user_data = ReadVUserData{ .iovecs = iovecs };
+    sqe.user_data = @intFromPtr(&user_data);
+
+    // now update the sq_ring array, which is an array of indecies into the
+    // actual sqe array. remember, the tail is an index into the sq_ring array,
+    // which contains the index into the sqe array, which is just tail.
+    io_uring.sring.array[tail] = tail;
+    std.debug.print("vacant sqe: {any}\n", .{sqe});
+
+    // now, update the sq_ring tail, to point to the next vacant sqe (note,
+    // this is just for our thread to know the tail is updated. later we will
+    // atomically load the tail, so the kernal gets the latest tail. not doing
+    // it now just to show that perhaps you would fill in multiple sqes before
+    // "entering" them to the kernal. At the moment of entering, you would do
+    // the atomic load. This way the kernal would see multiple new sqes to act
+    // on.)
+    io_uring.sring.tail.* = next_tail;
+
+    // Since we're just doing 1 readv operation, we can finally submit the
+    // read! First make sure the kernal has an updated view of the tail, and
+    // then perform the "enter" syscall.
+    @atomicStore(u32, io_uring.sring.tail, io_uring.sring.tail.*, .Release);
+    const to_submit = 1;
+    const flags = linux.IORING_ENTER_GETEVENTS;
+    // With flags set to what we have, this tells the syscall to wait till 1
+    // sqe is complete, so we can proceed after it returns to process a filled
+    // in cqe.
+    const min_complete = 1;
+    // Not too sure what these next 2 are, but the example sets them to this
+    const sig: ?*os.sigset_t = null;
+    const sz = 0;
+    const ios_consumed = syscall6(SYS.io_uring_enter, @intCast(io_uring.fd), to_submit, min_complete, flags, @intFromPtr(sig), sz);
+    std.debug.print("ios_consumed: {any}\n", .{ios_consumed});
+}
+
+fn read_and_print_file(file_path: []const u8, allocator: *Allocator) !void {
+    var io_uring = try io_uring_setup();
+
+    // With io_uring set up, we can nowwe'll perform an io_uring submission, and
+    // then consume the io_uring for the corresponding completion.
+    try submit_read(file_path, allocator, &io_uring);
 }
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    try read_and_print_file("test.txt", gpa.allocator());
+    var allocator = gpa.allocator();
+    try read_and_print_file("test.txt", &allocator);
 }
