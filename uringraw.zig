@@ -2,12 +2,11 @@
 /// not using any lib support, so all the io_uring stuff is as raw as it gets!
 /// Which means it is quite cumbersome, but just awesome to see it all laid out
 /// In uringlib.zig we use zig's implementation of liburing, which makes things
-/// way nicer (but hides a lot of what is going on with io_uring interface). 
+/// way nicer (but hides a lot of what is going on with io_uring interface).
 ///
 /// This is just for my personal education about zig and io_uring, so it's
 /// mostly laid out in very careless/excessive ways so I can come back to it
 /// and understand what I was thinking.
-
 const std = @import("std");
 const os = std.os;
 const linux = os.linux;
@@ -37,7 +36,7 @@ const Sring = struct {
     entries: u32,
     /// flags
     flags: u32,
-    /// array of sqes
+    /// ptr to the array of sqes
     sqes: [*]linux.io_uring_sqe,
 };
 
@@ -172,6 +171,8 @@ fn io_uring_setup(allocator: *Allocator) !IoUring {
     sring.*.flags = @as(*u32, @ptrCast(@alignCast(sq_flags_ptr_u8))).*;
     sring.*.sqes = @ptrCast(@alignCast(sqes_ptr_u8));
     std.debug.print("sring: {any}\n", .{sring});
+    std.debug.print("sring head: {any}\n", .{sring.*.head.*});
+    std.debug.print("sring tail: {any}\n", .{sring.*.tail.*});
 
     // Not breaking things apart for the cqes
     var cring = try allocator.create(Cring);
@@ -202,6 +203,7 @@ fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring)
         buffCount += 1;
     }
     std.debug.print("buffCount: {any}\n", .{buffCount});
+    std.debug.print("file size: {any}\n", .{fstat.size});
 
     // Now alloc all the iovecs
     var iovecs: []os.iovec = try allocator.*.alloc(os.iovec, @intCast(buffCount));
@@ -237,29 +239,38 @@ fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring)
     // when it technically isn't, so it's not detrimental, "conservative",
     // better than using a lock to ensure a totally correct value for the head)
     const tail = io_uring.*.sring.*.tail.*;
+    std.debug.print("current tail?: {any}\n", .{io_uring.*.sring.*.tail.*});
     const next_tail = tail + 1;
     const sqe_idx = tail & io_uring.*.sring.*.mask;
-    var sqe = io_uring.*.sring.*.sqes[sqe_idx];
-    sqe.fd = fd;
-    sqe.flags = 0;
-    // this is what makes io_uring do the equivelant of the readv syscall
-    sqe.opcode = linux.IORING_OP.READV;
-    // because we're doing a readv, we need the iovecs ptr here
-    sqe.addr = @intFromPtr(iovecs.ptr);
-    sqe.len = @as(u32, @intCast(buffCount));
-    sqe.off = 0;
+    var sqe: *linux.io_uring_sqe = &io_uring.*.sring.*.sqes[sqe_idx];
 
-    // now to fill the "user_data". Technically, here we're only making one
-    // io_uring submission, so we know what we're getting out on the cq side,
-    // but might as well set the following up since it's so easy. On the cqe
-    // size, how do we know the number of iovecs submitted with the readv? We
-    // need to setup a structure which holds some relevant info, so on the cq
-    // side we can do what we need with the filled in iovec buffs, namely print
-    // the buffs to stdout. Again, must alloc, so it can be valid outside the
-    // scope of the stack.
+    // Now the "user_data". Technically, here we're only making one io_uring
+    // submission, so we know what we're getting out on the cq side, but might
+    // as well set the following up since it's so easy. On the cqe size, how do
+    // we know the number of iovecs submitted with the readv? We need to setup
+    // a structure which holds some relevant info, so on the cq side we can do
+    // what we need with the filled in iovec buffs, namely print the buffs to
+    // stdout. Again, must alloc, so it can be valid outside the scope of the
+    // stack.
     var user_data = try allocator.*.create(ReadVUserData);
     user_data.* = ReadVUserData{ .iovecs = iovecs };
-    sqe.user_data = @intFromPtr(user_data);
+    sqe.* = .{
+        .opcode = linux.IORING_OP.READV,
+        .flags = 0,
+        .ioprio = 0,
+        .fd = fd,
+        .off = 0,
+        .addr = @intFromPtr(iovecs.ptr),
+        .len = @as(u32, @intCast(iovecs.len)),
+        .rw_flags = 0,
+        .user_data = @intFromPtr(user_data),
+        // not sure what the rest do
+        .buf_index = 0,
+        .personality = 0,
+        .splice_fd_in = 0,
+        .addr3 = 0,
+        .resv = 0,
+    };
 
     // now update the sq_ring array, which is an array of indecies into the
     // actual sqe array. remember, the tail is an index into the sq_ring array,
@@ -275,12 +286,14 @@ fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring)
     // "entering" them to the kernal. At the moment of entering, you would do
     // the atomic load. This way the kernal would see multiple new sqes to act
     // on.)
-    io_uring.*.sring.*.tail.* = next_tail;
+    // io_uring.*.sring.*.tail.* = next_tail;
+    // @atomicStore(u32, io_uring.*.sring.*.tail.*, next_tail, .Release);
 
     // Since we're just doing 1 readv operation, we can finally submit the
     // read! First make sure the kernal has an updated view of the tail, and
     // then perform the "enter" syscall.
-    @atomicStore(u32, io_uring.*.sring.*.tail, io_uring.*.sring.*.tail.*, .Release);
+    @atomicStore(u32, io_uring.*.sring.*.tail, next_tail, .Release);
+    std.debug.print("new tail?: {any}\n", .{io_uring.*.sring.*.tail.*});
     const to_submit = 1;
     const flags = linux.IORING_ENTER_GETEVENTS;
     // With flags set to what we have, this tells the syscall to wait till 1
@@ -290,11 +303,13 @@ fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring)
     // Not too sure what these next 2 are, but the example sets them to this
     const sig: ?*os.sigset_t = null;
     const sz = 0;
-    const ios_consumed = syscall6(SYS.io_uring_enter, @intCast(io_uring.*.fd), to_submit, min_complete, flags, @intFromPtr(sig), sz);
+    const ios_consumed = syscall6(SYS.io_uring_enter, @as(usize, @bitCast(@as(isize, io_uring.*.fd))), to_submit, min_complete, flags, @intFromPtr(sig), sz);
+    // syscall6(.io_uring_enter, @as(usize, @bitCast(@as(isize, fd))), to_submit, min_complete, flags, @intFromPtr(sig), NSIG / 8);
     std.debug.print("ios_consumed: {any}\n", .{ios_consumed});
 }
 
-fn consume_completion_and_print(io_uring: *IoUring) !void {
+fn consume_completion_and_print(allocator: *Allocator, io_uring: *IoUring) !void {
+    _ = allocator;
     // Now that the submition has been made (with the configuration to wait for
     // the completion before returning), we can get the cqe, get the user_data,
     // get the iovecs (which should now be all filled in), and print the filled
@@ -306,26 +321,41 @@ fn consume_completion_and_print(io_uring: *IoUring) !void {
     // (since our code only runs in 1 thread), but tail reads need to be
     // atomic, and head writes should be atomic when we're ready to let the
     // kernal know about them.
-    var ready_cqes = @atomicLoad(u32, io_uring.*.cring.*.tail, .Acquire) - io_uring.*.cring.*.head.*;
-    std.debug.print("ready_cqes: {any}\n", .{ready_cqes});
     const head = io_uring.*.cring.*.head.*;
+    var ready_cqes = @atomicLoad(u32, io_uring.*.cring.*.tail, .Acquire) - head;
+    std.debug.print("ready_cqes: {any}\n", .{ready_cqes});
     const tail = io_uring.*.cring.*.tail.*;
     std.debug.print("head: {any}\n", .{head});
     std.debug.print("tail: {any}\n", .{tail});
     const cqe_idx = head & io_uring.*.cring.*.mask;
     std.debug.print("cqe_idx: {any}\n", .{cqe_idx});
-    const cqe = io_uring.*.cring.*.cqes[cqe_idx+1];
+    const cqe = io_uring.*.cring.*.cqes[cqe_idx];
     std.debug.print("cqe: {any}\n", .{cqe});
+    // now in theory we should update the head but we're not submitting more
+    // than one sqe so forgetting about it
+
+    // now that we have the cqe, we can get the user_data struct, get the
+    // iovecs, and print all the data :tada:
+    const user_data_ptr: *ReadVUserData = @ptrFromInt(cqe.user_data);
+    const iovecs = user_data_ptr.*.iovecs;
+    for (iovecs) |iovec| {
+        // write each byte to stdout!
+        std.debug.print("{s}", .{iovec.iov_base[0..iovec.iov_len]});
+    }
 }
 
 fn read_and_print_file(file_path: []const u8, allocator: *Allocator) !void {
     var io_uring = try io_uring_setup(allocator);
+    const head = io_uring.cring.*.head.*;
+    const tail = io_uring.cring.*.tail.*;
+    std.debug.print("cring head: {any}\n", .{head});
+    std.debug.print("cring tail: {any}\n", .{tail});
     std.debug.print("starting io_uring: {any}\n", .{io_uring});
 
     // With io_uring set up, we can nowwe'll perform an io_uring submission, and
     // then consume the io_uring for the corresponding completion.
     try submit_read(file_path, allocator, &io_uring);
-    try consume_completion_and_print(&io_uring);
+    try consume_completion_and_print(allocator, &io_uring);
 }
 
 pub fn main() !void {
