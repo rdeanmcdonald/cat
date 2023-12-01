@@ -1,8 +1,9 @@
 /// This is the cat program using io_uring to perform the read syscall. It's
 /// not using any lib support, so all the io_uring stuff is as raw as it gets!
 /// Which means it is quite cumbersome, but just awesome to see it all laid out
-/// In uringlib.zig we use zig's implementation of liburing, which makes things
-/// way nicer (but hides a lot of what is going on with io_uring interface).
+/// In cat_uring.zig we use zig's implementation of liburing, which makes
+/// things way nicer (but hides a lot of what is going on with io_uring
+/// interface).
 ///
 /// This is just for my personal education about zig and io_uring, so it's
 /// mostly laid out in very careless/excessive ways so I can come back to it
@@ -74,7 +75,7 @@ fn io_uring_setup(allocator: *Allocator) !IoUring {
 
     // Setup will create arrs for at least QUEUE_DEPTH number of elements (must
     // round the sq/cq size up to nearest power of 2 for the masking stuff)
-    var fd: os.fd_t = @intCast(syscall2(SYS.io_uring_setup, QUEUE_DEPTH, @intFromPtr(&params)));
+    const fd: os.fd_t = @intCast(syscall2(SYS.io_uring_setup, QUEUE_DEPTH, @intFromPtr(&params)));
 
     // that was easy! not worrying about errors
     std.debug.print("io uring fd: {any}\n", .{fd});
@@ -162,7 +163,7 @@ fn io_uring_setup(allocator: *Allocator) !IoUring {
     // alignCast before the ptrCast I guess (following what zig io_uring does).
     // Also, we need to alloc, otherwise the mem where the sring lives (stack
     // frame of the function)
-    var sring = try allocator.create(Sring);
+    const sring = try allocator.create(Sring);
     sring.*.array = @ptrCast(@alignCast(sq_ring_ptr_u8));
     sring.*.head = @ptrCast(@alignCast(sq_head_ptr_u8));
     sring.*.tail = @ptrCast(@alignCast(sq_tail_ptr_u8));
@@ -175,7 +176,7 @@ fn io_uring_setup(allocator: *Allocator) !IoUring {
     std.debug.print("sring tail: {any}\n", .{sring.*.tail.*});
 
     // Not breaking things apart for the cqes
-    var cring = try allocator.create(Cring);
+    const cring = try allocator.create(Cring);
     cring.*.cqes = @ptrCast(@alignCast(&mmap_rings[params.cq_off.cqes]));
     cring.*.head = @ptrCast(@alignCast(&mmap_rings[params.cq_off.head]));
     cring.*.tail = @ptrCast(@alignCast(&mmap_rings[params.cq_off.tail]));
@@ -206,13 +207,13 @@ fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring)
     std.debug.print("file size: {any}\n", .{fstat.size});
 
     // Now alloc all the iovecs
-    var iovecs: []os.iovec = try allocator.*.alloc(os.iovec, @intCast(buffCount));
+    const iovecs: []os.iovec = try allocator.*.alloc(os.iovec, @intCast(buffCount));
 
     // Now alloc all the buffs and put them in the iovec. Again, being lazy
     // about deallocating, since this cat program will just exit when done
     // anyways.
     for (iovecs) |*iovec| {
-        var buff = try allocator.*.alloc(u8, BUFF_SIZE);
+        const buff = try allocator.*.alloc(u8, BUFF_SIZE);
 
         iovec.*.iov_len = buff.len;
         iovec.*.iov_base = buff.ptr;
@@ -242,7 +243,7 @@ fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring)
     std.debug.print("current tail?: {any}\n", .{io_uring.*.sring.*.tail.*});
     const next_tail = tail + 1;
     const sqe_idx = tail & io_uring.*.sring.*.mask;
-    var sqe: *linux.io_uring_sqe = &io_uring.*.sring.*.sqes[sqe_idx];
+    const sqe: *linux.io_uring_sqe = &io_uring.*.sring.*.sqes[sqe_idx];
 
     // Now the "user_data". Technically, here we're only making one io_uring
     // submission, so we know what we're getting out on the cq side, but might
@@ -252,7 +253,7 @@ fn submit_read(file_path: []const u8, allocator: *Allocator, io_uring: *IoUring)
     // what we need with the filled in iovec buffs, namely print the buffs to
     // stdout. Again, must alloc, so it can be valid outside the scope of the
     // stack.
-    var user_data = try allocator.*.create(ReadVUserData);
+    const user_data = try allocator.*.create(ReadVUserData);
     user_data.* = ReadVUserData{ .iovecs = iovecs };
     sqe.* = .{
         .opcode = linux.IORING_OP.READV,
@@ -322,7 +323,7 @@ fn consume_completion_and_print(allocator: *Allocator, io_uring: *IoUring) !void
     // atomic, and head writes should be atomic when we're ready to let the
     // kernal know about them.
     const head = io_uring.*.cring.*.head.*;
-    var ready_cqes = @atomicLoad(u32, io_uring.*.cring.*.tail, .Acquire) - head;
+    const ready_cqes = @atomicLoad(u32, io_uring.*.cring.*.tail, .Acquire) - head;
     std.debug.print("ready_cqes: {any}\n", .{ready_cqes});
     const tail = io_uring.*.cring.*.tail.*;
     std.debug.print("head: {any}\n", .{head});
@@ -361,5 +362,5 @@ fn read_and_print_file(file_path: []const u8, allocator: *Allocator) !void {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var allocator = gpa.allocator();
-    try read_and_print_file("test.txt", &allocator);
+    try read_and_print_file("test_file_small.txt", &allocator);
 }

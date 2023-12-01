@@ -14,14 +14,14 @@ const ReadVUserData = struct {
 
 /// Creates sqe for the read file op
 fn read_file(allocator: *Allocator, io_uring: *linux.IO_Uring, file: []const u8) !void {
-    var user_data = try allocator.*.create(ReadVUserData);
+    const user_data = try allocator.*.create(ReadVUserData);
     const fd = try os.open(file, os.O.RDONLY, 0o666);
     const fstat: os.Stat = try os.fstat(fd);
     var buffCount = @divFloor(fstat.size, BUFF_SIZE);
     if (@mod(fstat.size, BUFF_SIZE) != 0) {
         buffCount += 1;
     }
-    var iovecs = try allocator.*.alloc(os.iovec, @intCast(buffCount));
+    const iovecs = try allocator.*.alloc(os.iovec, @intCast(buffCount));
     var bytes_remaining = fstat.size;
     var current_block: u64 = 0;
     while (bytes_remaining > 0) {
@@ -29,8 +29,8 @@ fn read_file(allocator: *Allocator, io_uring: *linux.IO_Uring, file: []const u8)
         if (bytes_remaining > BUFF_SIZE) {
             bytes_to_read = BUFF_SIZE;
         }
-        var buff = try allocator.*.alloc(u8, BUFF_SIZE);
-        var iovec = &iovecs[current_block];
+        const buff = try allocator.*.alloc(u8, BUFF_SIZE);
+        const iovec = &iovecs[current_block];
         iovec.* = .{
             .iov_base = buff.ptr,
             .iov_len = @intCast(bytes_to_read),
@@ -53,7 +53,7 @@ pub fn main() !void {
     var allocator = gpa.allocator();
     var io_uring = try linux.IO_Uring.init(IO_URING_DEPTH, 0);
     const fileCount = 2;
-    const files: [fileCount][]const u8 = .{"test2.txt", "test.txt"};
+    const files: [fileCount][]const u8 = .{"test_file_small_2.txt", "test_file_small.txt"};
 
     // enter all the sqes to read in parallel
     for (files) |file| {

@@ -155,5 +155,5 @@ pub fn main() !void {
     var allocator = gpa.allocator();
     var ring = try linux.IO_Uring.init(RING_DEPTH, 0);
 
-    _ = try copy(&allocator, &ring, "test2.txt", "result.txt");
+    _ = try copy(&allocator, &ring, "test_file_large.txt", "result.txt");
 }

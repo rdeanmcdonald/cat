@@ -34,7 +34,7 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
             bytes_to_read = BLOCK_SIZE;
         }
 
-        var buff: []u8 = try allocator.alloc(u8, @intCast(bytes_to_read));
+        const buff: []u8 = try allocator.alloc(u8, @intCast(bytes_to_read));
 
         iovecs[current_block].iov_base = buff.ptr;
         iovecs[current_block].iov_len = @intCast(bytes_to_read);
@@ -56,6 +56,6 @@ fn read_and_print_file(file_path: []const u8, allocator: Allocator) !void {
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    try read_and_print_file("test.txt", gpa.allocator());
-    try read_and_print_file("test2.txt", gpa.allocator());
+    try read_and_print_file("test_file_small.txt", gpa.allocator());
+    try read_and_print_file("test_file_small_2.txt", gpa.allocator());
 }
