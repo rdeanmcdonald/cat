@@ -10,8 +10,8 @@
 /// presupposes that we read and write in chunks (16kb in the article). This is
 /// the general concept from the article. There may be more interesting things
 /// we could do to maximize throughput, but I'm just going to follow the
-/// general idea from the article, because it's a really nice example
-/// leveraging io_uring for many submits and many completions.
+/// general idea from the article because it's a really nice example leveraging
+/// io_uring for many submits and many completions.
 const std = @import("std");
 const os = std.os;
 const linux = os.linux;
@@ -89,7 +89,7 @@ fn copy(allocator: *Allocator, ring: *linux.IO_Uring, src: []const u8, dst: []co
     var bytes_written: u64 = 0;
     var total_cqes: u64 = 0;
     var total_sqes: u64 = 0;
-    while (read_bytes_submitted < total_bytes or write_bytes_submitted < total_bytes) {
+    while (bytes_read < total_bytes or bytes_written < total_bytes) {
         if (read_bytes_submitted < total_bytes) {
             const sqes_ready = ring.sq_ready();
             var to_read = sqe_len - sqes_ready;
@@ -126,12 +126,13 @@ fn copy(allocator: *Allocator, ring: *linux.IO_Uring, src: []const u8, dst: []co
                 std.debug.print("partial io!!\nread?: {any}\nsubmitted: {any}\ncompleted: {any}\n", .{ user_data.is_read, user_data.bytes, cqe.res });
             }
             if (user_data.is_read) {
+                bytes_read += @intCast(cqe.res);
+
                 const is_read = &user_data.*.is_read;
                 is_read.* = false;
                 _ = try ring.writev(@intFromPtr(user_data), dst_fd, user_data.iovecs_const, user_data.off);
                 to_write -= 1;
                 write_bytes_submitted += user_data.bytes;
-                bytes_read += @intCast(cqe.res);
             } else {
                 bytes_written += @intCast(cqe.res);
             }
